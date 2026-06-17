@@ -1,6 +1,9 @@
 import json
 import os
+import re
+
 from groq import Groq
+
 from config import GROQ_API_KEY, LLM_MODEL, VALID_LABELS, DATA_PATH, TRAIN_FILE, LABELS_FILE
 
 _client = Groq(api_key=GROQ_API_KEY)
@@ -40,43 +43,128 @@ def load_labeled_examples() -> list[dict]:
 
 def build_few_shot_prompt(labeled_examples: list[dict], description: str) -> str:
     """
-    Build a few-shot classification prompt using the student's labeled training examples.
+    Build a few-shot classification prompt using labeled training examples.
 
-    TODO — Milestone 2:
-
-    Your prompt needs to:
-      1. Describe the task and the four valid labels
-      2. Show the labeled training examples so the LLM can learn the pattern
-      3. Present the new description and ask for a classification
-
-    The LLM should return a single label from VALID_LABELS (exactly as written)
-    plus a brief explanation of its reasoning. Think carefully about the output
-    format you request — you'll need to parse it in classify_episode().
-
-    Before writing code, complete specs/classifier-spec.md.
+    The prompt describes the four valid labels, includes all labeled examples,
+    presents the new description, and asks for a JSON classification result.
     """
-    return ""
+    label_definitions = {
+        "interview": "a host interviews one or more guests in a question-and-answer conversation",
+        "solo": "one host speaks alone from their own thoughts, experience, or analysis",
+        "panel": "three or more speakers discuss a topic as rough equals, with no clear host-guest dynamic",
+        "narrative": "a reported or documentary-style story assembled from events, sources, recordings, or interviews",
+    }
+
+    examples = []
+    for index, example in enumerate(labeled_examples, start=1):
+        examples.append(
+            "\n".join([
+                f"Example {index}",
+                f"Title: {example.get('title', '').strip()}",
+                f"Podcast: {example.get('podcast', '').strip()}",
+                f"Description: {example.get('description', '').strip()}",
+                f"Label: {example.get('label', '').strip()}",
+            ])
+        )
+
+    examples_block = "\n\n---\n\n".join(examples)
+    if not examples_block:
+        examples_block = "No labeled examples were provided. Rely on the label definitions."
+
+    labels_block = "\n".join(
+        f"- {label}: {label_definitions[label]}" for label in VALID_LABELS
+    )
+
+    return f"""You are classifying podcast episodes by their structural format.
+
+Choose exactly one label from this list:
+{labels_block}
+
+Use the labeled examples to infer the distinction between formats. Focus on the episode structure, not the topic or tone.
+
+Labeled examples:
+{examples_block}
+
+Episode to classify:
+Description: {description.strip()}
+
+Return only valid JSON in this exact shape:
+{{"label": "interview|solo|panel|narrative", "reasoning": "one brief sentence explaining the structural signal"}}
+
+Do not include Markdown, code fences, or any text outside the JSON object."""
+
+
+def _parse_classifier_response(text: str) -> dict:
+    """
+    Extract a classifier result from the model response.
+
+    The prompt asks for JSON, but this parser also handles common fallback shapes
+    like "Label: solo" so one imperfect response does not break evaluation.
+    """
+    raw_text = (text or "").strip()
+    result = {"label": "unknown", "reasoning": raw_text or "Empty LLM response."}
+
+    json_match = re.search(r"\{.*\}", raw_text, flags=re.DOTALL)
+    if json_match:
+        try:
+            parsed = json.loads(json_match.group(0))
+            label = str(parsed.get("label", "")).strip().lower()
+            reasoning = str(parsed.get("reasoning", "")).strip()
+            result["label"] = label if label in VALID_LABELS else "unknown"
+            result["reasoning"] = reasoning or raw_text
+            return result
+        except (json.JSONDecodeError, TypeError, ValueError):
+            pass
+
+    label_match = re.search(r"label\s*:\s*([A-Za-z_-]+)", raw_text, flags=re.IGNORECASE)
+    if label_match:
+        label = label_match.group(1).strip().lower()
+    else:
+        first_token = re.split(r"[\s,.;:]+", raw_text, maxsplit=1)[0].strip().lower()
+        label = first_token
+
+    if label in VALID_LABELS:
+        result["label"] = label
+
+    reasoning_match = re.search(
+        r"reasoning\s*:\s*(.+)", raw_text, flags=re.IGNORECASE | re.DOTALL
+    )
+    if reasoning_match:
+        result["reasoning"] = reasoning_match.group(1).strip()
+
+    return result
 
 
 def classify_episode(description: str, labeled_examples: list[dict]) -> dict:
     """
     Classify a single podcast episode description using the few-shot LLM classifier.
 
-    TODO — Milestone 2 (complete after build_few_shot_prompt):
-
-    Steps:
-      1. Call build_few_shot_prompt() to construct the prompt
-      2. Send it to the LLM via _client.chat.completions.create()
-      3. Parse the response to extract a label and reasoning
-      4. Validate the label — if it's not in VALID_LABELS, set it to "unknown"
-      5. Return a dict with "label" and "reasoning" keys
-
-    Handle the case where the LLM returns something unparseable gracefully —
-    don't let a bad response crash the whole evaluation.
-
-    Before writing code, complete specs/classifier-spec.md.
+    Returns a dict with "label" and "reasoning". The label is one of VALID_LABELS,
+    or "unknown" if the API call, parsing, or validation fails.
     """
-    return {
-        "label": None,
-        "reasoning": "Classifier not yet implemented. Complete Milestone 2.",
-    }
+    prompt = build_few_shot_prompt(labeled_examples, description)
+
+    try:
+        response = _client.chat.completions.create(
+            model=LLM_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a careful podcast-format classifier. "
+                        "Return only the requested JSON object."
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ],
+            max_tokens=250,
+            temperature=0,
+        )
+        text = response.choices[0].message.content
+    except Exception as exc:
+        return {
+            "label": "unknown",
+            "reasoning": f"Classification failed: {exc}",
+        }
+
+    return _parse_classifier_response(text)

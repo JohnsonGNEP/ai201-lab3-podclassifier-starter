@@ -1,9 +1,8 @@
-# Classifier Spec — Pod Classifier
+# Classifier Spec - Pod Classifier
 
-Complete this spec **before** writing any code for Milestone 2.
+Complete this spec before writing any code for Milestone 2.
 
-Use Plan or Ask mode to think through each blank field. When you're done,
-your answers here become the blueprint for `build_few_shot_prompt()` and
+These answers are the blueprint for `build_few_shot_prompt()` and
 `classify_episode()` in `classifier.py`.
 
 ---
@@ -11,14 +10,15 @@ your answers here become the blueprint for `build_few_shot_prompt()` and
 ## build_few_shot_prompt(labeled_examples, description)
 
 ### What it does
-Constructs a prompt string for the LLM that includes the task instructions,
-all labeled training examples, and the new episode description to classify.
+
+Constructs a prompt string for the LLM that includes the task instructions, all
+labeled training examples, and the new episode description to classify.
 
 ### Inputs
 
 | Parameter | Type | Description |
 |---|---|---|
-| `labeled_examples` | `list[dict]` | Each dict has `"title"`, `"description"`, `"label"` (and others). These are the examples you labeled in Milestone 1. |
+| `labeled_examples` | `list[dict]` | Each dict has `"title"`, `"description"`, `"label"` and other metadata from the training set. |
 | `description` | `str` | The episode description to classify. |
 
 ### Output
@@ -29,90 +29,72 @@ all labeled training examples, and the new episode description to classify.
 
 ---
 
-### Spec fields — fill these in before writing code
+### Task Instruction
 
-**Task instruction (what should the LLM know about the task?):**
+The LLM should know that it is classifying podcast episodes by structural
+format, not by topic, mood, or production quality. It must choose exactly one of
+these labels:
 
-```
-You are classifying podcast episodes by their format. Classify the episode
-into exactly one of these four labels:
+- `interview`: a host interviews one or more guests in a question-and-answer conversation.
+- `solo`: one host speaks alone from their own thoughts, experience, or analysis.
+- `panel`: three or more speakers discuss a topic as rough equals, with no clear host-guest dynamic.
+- `narrative`: a reported or documentary-style story assembled from events, sources, recordings, or interviews.
 
-- interview: a conversation between a host and one or more guests
-- solo: a single host speaking from memory, experience, or opinion — no guests,
-  no assembled external sources
-- panel: multiple guests with roughly equal speaking time, often debating or
-  discussing a topic together
-- narrative: a story assembled from external sources — interviews, archival
-  audio, reporting — with a clear narrative arc
+### Labeled Example Format
 
-Return only the label and your reasoning. Do not explain the taxonomy.
-```
+Each example should include the title, podcast name, full description, and
+correct label. Examples should be separated with a visible delimiter so the
+model can tell where one example ends and the next begins.
 
----
+Example:
 
-**How should labeled examples be formatted in the prompt?**
-
-```
-Each example should include the episode title, a brief excerpt or the full
-description, and the correct label. Separate examples with a blank line or
-a delimiter like "---". Include all fields that help the model see why the
-label was applied — title and description are both useful; other fields
-(like episode ID) are not needed.
+```text
+Example 1
+Title: Dr. Priya Nair on the Science of Sleep Deprivation
+Podcast: The Body Electric
+Description: Dr. Priya Nair has spent fifteen years studying what happens...
+Label: interview
 ```
 
----
+### New Episode Format
 
-**Example block sketch (write one concrete example):**
+The episode being classified should be presented after the labeled examples:
 
-```
-Title: {title}
+```text
+Episode to classify:
 Description: {description}
-Label: {label}
 ```
 
----
+The function only receives a description, so the new episode does not include a
+title.
 
-**How should the new episode (to be classified) be presented?**
+### Requested Output Format
 
-```
-Present it in the same format as the labeled examples, but omit the Label
-line and replace it with an instruction to classify. For example:
+Request a single JSON object and no surrounding Markdown:
 
-Title: {title}
-Description: {description}
-Label: ?
-
-Then add a line like: "Classify the episode above. Return your answer in
-the format below:" followed by the output format you chose.
+```json
+{"label": "interview|solo|panel|narrative", "reasoning": "one brief sentence explaining the structural signal"}
 ```
 
----
+JSON is easier to parse than free-form prose because the code can read the
+`label` and `reasoning` keys. The parser should still tolerate extra text,
+because LLMs sometimes wrap JSON in prose or code fences.
 
-**What output format should you request from the LLM?**
+### Prompt Edge Cases
 
-```
-[blank — you need to parse the response in classify_episode(). What format
-makes parsing reliable? Think about: a single label on its own line?
-A structured format like "Label: X / Reasoning: Y"? JSON?
-What are the tradeoffs?]
-```
-
----
-
-**Edge cases to handle in the prompt:**
-
-```
-[blank — what if labeled_examples is empty? What if the description is very
-short? How does your prompt handle these?]
-```
+If `labeled_examples` is empty, the prompt should still include the label
+definitions and explicitly say no examples were provided. If `description` is
+short, the model should classify from the available structural cues and explain
+the decision briefly.
 
 ---
 
 ## classify_episode(description, labeled_examples)
 
 ### What it does
-Classifies a single podcast episode description using the few-shot LLM classifier.
-Returns a dict with a label and reasoning.
+
+Classifies a single podcast episode description using the few-shot LLM
+classifier. Returns a dict with a label and reasoning.
 
 ### Inputs
 
@@ -125,112 +107,76 @@ Returns a dict with a label and reasoning.
 
 | Return value | Type | Description |
 |---|---|---|
-| result | `dict` | Must have keys `"label"` and `"reasoning"`. `"label"` must be one of `VALID_LABELS` or `"unknown"`. |
+| result | `dict` | Must have `"label"` and `"reasoning"`. `"label"` must be one of `VALID_LABELS` or `"unknown"`. |
 
 ---
 
-### Spec fields — fill these in before writing code
+### Step 1 - Build The Prompt
 
-**Step 1 — Build the prompt:**
+Call `build_few_shot_prompt(labeled_examples, description)` and store the
+returned string in `prompt`.
 
-```
-Call build_few_shot_prompt(labeled_examples, description) and store the
-returned string in a variable (e.g., prompt). Pass through both arguments
-exactly as received — no modification needed before calling.
-```
+### Step 2 - Send To The LLM
 
----
+Call `_client.chat.completions.create()` with:
 
-**Step 2 — Send to the LLM:**
+- `model=LLM_MODEL`
+- a short system message that asks for only the JSON object
+- one user message containing the prompt
+- `max_tokens=250`
+- `temperature=0`
 
-```
-Call _client.chat.completions.create() with:
-  - model: the model name from config (LLM_MODEL)
-  - messages: a list with one dict — {"role": "user", "content": prompt}
-    (system-design.md shows an optional system message too — either shape works)
-  - max_tokens: a reasonable limit (e.g., 200–300) to keep responses concise
+Extract text from `response.choices[0].message.content`.
 
-Extract the response text from:
-  response.choices[0].message.content
-```
+### Step 3 - Parse The Response
 
----
+Strip the raw response, search for a JSON object with a regex, and parse that
+substring with `json.loads()`. Read `"label"` and `"reasoning"` from the parsed
+dict. Normalize the label with `strip().lower()`.
 
-**Step 3 — Parse the response:**
+If JSON parsing fails, fall back to simple text parsing for common shapes like
+`Label: solo` or a first-token label.
 
-```
-[blank — how do you extract the label and reasoning from the LLM's text output?
-What string operations or parsing logic do you need?
-This depends on the output format you chose in build_few_shot_prompt.]
-```
+### Step 4 - Validate The Label
 
----
+If the normalized label is one of `VALID_LABELS`, return it. Otherwise set the
+label to `"unknown"` and preserve the raw response or parsed reasoning so the
+user can diagnose what happened.
 
-**Step 4 — Validate the label:**
+### Step 5 - Handle Errors Gracefully
 
-```
-[blank — what do you do if the LLM returns a label that isn't in VALID_LABELS?
-What should label be set to?]
-```
-
----
-
-**Step 5 — Handle errors gracefully:**
-
-```
-[blank — what could go wrong? (Network error? Unparseable response?)
-What should the function return if something fails?
-Hint: the evaluation loop runs 20 calls — one bad response shouldn't crash everything.]
-```
-
----
-
-### Return value structure
+The API call can fail because of a missing API key, network issue, rate limit,
+or provider error. The model can also return invalid JSON or an invalid label.
+For API errors, return:
 
 ```python
-{
-    "label": str,      # one of VALID_LABELS, or "unknown" if invalid/error
-    "reasoning": str,  # brief explanation from the LLM
-}
+{"label": "unknown", "reasoning": "Classification failed: ..."}
 ```
 
----
-
-## Notes on label quality
-
-The classifier is only as good as your labels. If your training examples have
-inconsistent or ambiguous labels, the LLM will learn the wrong pattern.
-
-Before implementing the classifier, re-read `data/taxonomy.md` and double-check
-any labels you're unsure about. Annotation quality is part of the lab.
+For parsing errors, return `"unknown"` with the raw response as reasoning. This
+keeps the 20-episode evaluation loop running even if one response is bad.
 
 ---
 
 ## Implementation Notes
 
-*Fill this in after implementing and testing both functions.*
+### Raw LLM Response Test
 
-**Test: what does the raw LLM response look like for one episode?**
+Not run locally; this requires a live `GROQ_API_KEY` and network access.
 
-```
-Episode tested: [title]
-Raw response text: [paste it here]
-```
+### Parser Summary
 
-**How did you parse the label out of the response?**
+The parser strips the response, extracts the first JSON object, parses it, and
+normalizes the `label` field. If JSON parsing fails, it looks for `Label: ...`
+and then tries the first token as a last fallback.
 
-```
-[describe the string operations — strip, split, lower, etc.]
-```
+### Unknown Labels
 
-**Did any episodes return `"unknown"`? If so, why?**
+`"unknown"` is returned for API failures, invalid labels, empty responses, or
+responses that cannot be parsed.
 
-```
-[yes / no — if yes, what did the raw response look like?]
-```
+### Output Format Note
 
-**One thing about the output format that surprised you:**
-
-```
-[your answer here]
-```
+Even when a prompt asks for JSON only, LLMs can include extra prose or code
+fences, so the parser extracts JSON from within the response instead of assuming
+the whole response is clean JSON.

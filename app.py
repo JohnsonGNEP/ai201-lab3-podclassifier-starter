@@ -102,7 +102,7 @@ def run_eval() -> str:
     if not labeled_examples:
         return (
             "⚠️  No labeled examples found.\n\n"
-            "Complete Milestone 1 first: open data/my_labels.json and add labels "
+            "No training labels were loaded: open data/my_labels.json and add labels "
             "for the training episodes."
         )
     print("\n--- Running evaluation ---")
